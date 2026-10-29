@@ -1,0 +1,22 @@
+name: build-and-test
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make
+      - name: Tests
+        run: make test
+      - name: ThreadSanitizer
+        run: make tsan
+  macos:
+    runs-on: macos-latest
+    continue-on-error: true   # Linux дээр л бүрэн шалгасан (Known issues)
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make CC=clang
+      - name: Tests
+        run: make test

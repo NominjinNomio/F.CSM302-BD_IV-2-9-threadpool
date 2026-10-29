@@ -1,0 +1,551 @@
+<!doctype html>
+<html lang="mn">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Thread Pool — Worker Activity</title>
+<style>
+:root{
+  --bg:#f4f3ef; --panel:#ffffff; --ink:#1d1f23; --muted:#6b6f78; --line:#dedcd5;
+  --accent:#2f5bd3; --accent-ink:#fff; --idle:#ecebe6; --idle-stripe:#dcdad2;
+  --ok:#1f8a4c; --bad:#c8322b; --warn:#b7791f; --queue:#7a5af5; --exit:#3a3d44;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "DejaVu Sans", sans-serif;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#15171b; --panel:#1d2026; --ink:#e7e8ea; --muted:#9aa0aa; --line:#2e323a;
+    --accent:#6d8dff; --accent-ink:#0d1020; --idle:#23262d; --idle-stripe:#2b2f37;
+    --ok:#46c27b; --bad:#ff6b61; --warn:#e3a740; --queue:#a48bff; --exit:#8a8f99;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#15171b; --panel:#1d2026; --ink:#e7e8ea; --muted:#9aa0aa; --line:#2e323a;
+  --accent:#6d8dff; --accent-ink:#0d1020; --idle:#23262d; --idle-stripe:#2b2f37;
+  --ok:#46c27b; --bad:#ff6b61; --warn:#e3a740; --queue:#a48bff; --exit:#8a8f99;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans)}
+header{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:17px;margin:0;letter-spacing:.2px}
+header .code{font:600 12px var(--mono);background:var(--ink);color:var(--bg);padding:2px 7px;border-radius:4px}
+header .sub{color:var(--muted);font-size:13px}
+header .status{margin-left:auto;font:12px var(--mono);color:var(--muted)}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:var(--muted)}
+.dot.on{background:var(--ok)} .dot.off{background:var(--bad)}
+main{display:grid;grid-template-columns:300px minmax(0,1fr);gap:16px;padding:16px 20px;max-width:1500px;margin:0 auto}
+@media (max-width:900px){main{grid-template-columns:1fr;padding:12px 16px}}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px}
+.panel h2{font-size:12px;text-transform:uppercase;letter-spacing:.8px;color:var(--muted);margin:0 0 10px}
+.stack{display:flex;flex-direction:column;gap:16px;min-width:0}
+label.f{display:grid;grid-template-columns:1fr 92px;align-items:center;gap:8px;margin:6px 0;font-size:13px}
+label.f small{display:block;color:var(--muted);font-size:11px}
+input,select,textarea,button{font:inherit;color:inherit}
+input[type=number],select{width:100%;padding:5px 7px;border:1px solid var(--line);border-radius:5px;background:var(--bg);font-family:var(--mono);font-size:13px}
+textarea{width:100%;min-height:150px;padding:7px;border:1px solid var(--line);border-radius:5px;background:var(--bg);font:12px/1.4 var(--mono);resize:vertical}
+.pair{display:flex;gap:4px}.pair input{min-width:0}
+label.f:has(.pair){grid-template-columns:1fr 140px}
+.mode{display:flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-bottom:8px}
+.mode button{flex:1;border:0;background:transparent;padding:6px;cursor:pointer;font-size:12.5px}
+.mode button.on{background:var(--ink);color:var(--bg)}
+.btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px}
+button.b{border:1px solid var(--line);background:var(--bg);padding:7px 11px;border-radius:6px;cursor:pointer;font-size:13px}
+button.b:hover{border-color:var(--muted)}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);font-weight:600}
+button:disabled{opacity:.45;cursor:not-allowed}
+.err{display:none;margin-top:10px;padding:8px 10px;border-radius:6px;border:1px solid var(--bad);color:var(--bad);font:12px/1.4 var(--mono);white-space:pre-wrap}
+.err.show{display:block}
+.note{color:var(--muted);font-size:12px;margin-top:8px}
+/* playback */
+.play{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.play .time{font:600 13px var(--mono);min-width:150px}
+.play input[type=range]{flex:1;min-width:160px;accent-color:var(--accent)}
+.play select{width:auto}
+.iconbtn{width:34px;height:32px;border:1px solid var(--line);background:var(--bg);border-radius:6px;cursor:pointer;font-size:14px}
+/* live state */
+.live{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:16px}
+@media (max-width:1100px){.live{grid-template-columns:1fr}}
+.workers{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.wcard{border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg);position:relative;overflow:hidden}
+.wcard .top{display:flex;justify-content:space-between;font:600 12px var(--mono)}
+.wcard .st{font-size:12px;margin-top:3px}
+.wcard .bar{height:4px;background:var(--idle-stripe);border-radius:2px;margin-top:6px;overflow:hidden}
+.wcard .bar i{display:block;height:100%;background:var(--accent)}
+.wcard.idle .st{color:var(--muted)} .wcard.exited{opacity:.55}
+.wcard.running{border-color:var(--accent)}
+.wcard .done{font:11px var(--mono);color:var(--muted)}
+.queue{display:flex;gap:4px;flex-wrap:wrap;margin:6px 0 10px}
+.slot{width:38px;height:30px;border:1px dashed var(--line);border-radius:4px;display:flex;align-items:center;justify-content:center;font:600 11px var(--mono);color:#fff}
+.slot.full{border:0}
+.counters{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.cnt{border:1px solid var(--line);border-radius:6px;padding:6px 8px;background:var(--bg)}
+.cnt b{display:block;font:600 18px var(--mono)} .cnt span{font-size:11px;color:var(--muted)}
+.evnow{margin-top:10px;font:12px var(--mono);padding:6px 8px;border-left:3px solid var(--accent);background:var(--bg);min-height:30px}
+/* timeline */
+#tlwrap{position:relative;overflow-x:auto}
+#timeline{display:block;cursor:crosshair;user-select:none}
+#timeline text{font-family:var(--mono)}
+.tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font:11.5px/1.4 var(--mono);padding:6px 8px;border-radius:5px;display:none;white-space:pre;z-index:5}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:8px}
+.legend i{display:inline-block;width:14px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+/* summary */
+.metrics{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.m{border:1px solid var(--line);border-radius:6px;padding:7px 9px;background:var(--bg)}
+.m b{display:block;font:600 15px var(--mono)} .m span{font-size:11.5px;color:var(--muted)}
+.checks{list-style:none;padding:0;margin:12px 0 0;font-size:12.5px}
+.checks li{padding:3px 0;border-bottom:1px dashed var(--line)}
+.checks .ok{color:var(--ok);font:600 11px var(--mono);margin-right:6px}
+.checks .fail{color:var(--bad);font:600 11px var(--mono);margin-right:6px}
+.cmd{font:11.5px var(--mono);color:var(--muted);word-break:break-all;margin-top:8px}
+details pre{max-height:220px;overflow:auto;font:11.5px var(--mono);background:var(--bg);padding:8px;border-radius:6px;border:1px solid var(--line)}
+/* event log */
+.logwrap{max-height:300px;overflow:auto;border:1px solid var(--line);border-radius:6px}
+table{border-collapse:collapse;width:100%;font:12px var(--mono)}
+th,td{padding:3px 8px;text-align:left;border-bottom:1px solid var(--line);white-space:nowrap}
+th{position:sticky;top:0;background:var(--panel);font-weight:600;color:var(--muted)}
+tr.cur td{background:color-mix(in srgb, var(--accent) 18%, transparent)}
+tr.future td{opacity:.45}
+tbody tr{cursor:pointer}
+.tag{padding:1px 5px;border-radius:3px;font-size:11px;font-weight:600}
+.t-SUBMIT{background:color-mix(in srgb,var(--queue) 22%,transparent);color:var(--queue)}
+.t-START{background:color-mix(in srgb,var(--accent) 22%,transparent);color:var(--accent)}
+.t-END{background:color-mix(in srgb,var(--ok) 22%,transparent);color:var(--ok)}
+.t-REJECT{background:color-mix(in srgb,var(--bad) 22%,transparent);color:var(--bad)}
+.t-SHUTDOWN,.t-WORKER_EXIT,.t-POOL_INIT{background:var(--idle);color:var(--muted)}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:s .8s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes s{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <span class="code">IV-2-9</span>
+  <h1>Thread Pool — Worker Activity</h1>
+  <span class="sub">OSC Ch.7 Project 1 · Pthreads + mutex + semaphore</span>
+  <span class="status" id="status"><span class="dot" id="dot"></span><span id="statusText">шалгаж байна…</span></span>
+</header>
+
+<main>
+  <!-- ===== Тохиргоо ===== -->
+  <div class="stack">
+    <section class="panel">
+      <h2>Pool тохиргоо</h2>
+      <label class="f"><span>Worker thread<small>1 – 64</small></span><input id="workers" type="number" min="1" max="64" value="3"></label>
+      <label class="f"><span>Queue багтаамж<small>1 – 4096 (номын анхдагч 10)</small></span><input id="queue" type="number" min="1" max="4096" value="5"></label>
+      <label class="f"><span>Дүүрэх үед<small>reject = номын дагуу 1 буцаана</small></span>
+        <select id="policy"><option value="reject">reject</option><option value="retry">retry</option></select></label>
+      <label class="f"><span>Retry зай, ms</span><input id="retry" type="number" min="1" max="10000" value="20"></label>
+    </section>
+
+    <section class="panel">
+      <h2>Ачаалал (task)</h2>
+      <div class="mode"><button id="mRandom" class="on">Параметрээр</button><button id="mList">Task жагсаалт</button></div>
+      <div id="randomBox">
+        <label class="f"><span>Task-ийн тоо<small>1 – 2000 (UI)</small></span><input id="ntasks" type="number" min="1" max="2000" value="15"></label>
+        <label class="f"><span>Хугацаа, ms<small>min – max</small></span><span class="pair"><input id="dmin" type="number" min="1" value="200"><input id="dmax" type="number" min="1" value="800"></span></label>
+        <label class="f"><span>Ирэх зай, ms<small>min – max</small></span><span class="pair"><input id="amin" type="number" min="0" value="20"><input id="amax" type="number" min="0" value="120"></span></label>
+        <label class="f"><span>Seed<small>ижил seed = ижил ачаалал</small></span><input id="seed" type="number" min="0" value="42"></label>
+      </div>
+      <div id="listBox" hidden>
+        <label class="f" style="grid-template-columns:1fr 150px"><span>Бэлэн тест</span><select id="preset"><option value="">— сонгох —</option></select></label>
+        <textarea id="tasktext" spellcheck="false" placeholder="# arrival_ms duration_ms&#10;0 300&#10;0 200&#10;50 100"></textarea>
+        <div class="note">Мөр бүр: <code>arrival_ms duration_ms</code>. arrival өсөх дарааллаар.</div>
+      </div>
+      <div class="btns">
+        <button class="b primary" id="run">▶ Ажиллуулах</button>
+        <button class="b" id="defaults" title="Тохиргоог анхны утгад">Анхдагч</button>
+      </div>
+      <div class="btns">
+        <button class="b" id="load">Trace ачаалах</button>
+        <button class="b" id="save" disabled>Trace хадгалах</button>
+        <input type="file" id="file" accept=".json,application/json" hidden>
+      </div>
+      <div class="err" id="err"></div>
+      <div class="note" id="runnote"></div>
+    </section>
+  </div>
+
+  <!-- ===== Дүрслэл ===== -->
+  <div class="stack">
+    <section class="panel">
+      <div class="play">
+        <button class="iconbtn" id="reset" title="Reset (эхэнд)">⏮</button>
+        <button class="iconbtn" id="prev" title="Өмнөх үйл явдал (←)">◀︎</button>
+        <button class="iconbtn" id="playbtn" title="Тоглуулах/зогсоох (Space)">▶</button>
+        <button class="iconbtn" id="next" title="Дараагийн үйл явдал (→)">▶︎</button>
+        <span class="time" id="time">t = 0 ms</span>
+        <input type="range" id="scrub" min="0" max="1000" value="0" step="1">
+        <select id="speed" title="Хурд"><option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1× (бодит)</option><option value="2">2×</option><option value="4">4×</option><option value="10">10×</option></select>
+      </div>
+    </section>
+
+    <section class="panel live">
+      <div>
+        <h2>Worker-ууд (t агшин)</h2>
+        <div class="workers" id="wcards"></div>
+      </div>
+      <div>
+        <h2>Task queue <span id="qlabel" style="text-transform:none;letter-spacing:0"></span></h2>
+        <div class="queue" id="qslots"></div>
+        <div class="counters">
+          <div class="cnt"><b id="cSub">0</b><span>хүлээн авсан</span></div>
+          <div class="cnt"><b id="cRun">0</b><span>ажиллаж буй</span></div>
+          <div class="cnt"><b id="cDone">0</b><span>дууссан</span></div>
+          <div class="cnt"><b id="cRej" style="color:var(--bad)">0</b><span>татгалзсан</span></div>
+        </div>
+        <div class="evnow" id="evnow">—</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Worker activity timeline</h2>
+      <div id="tlwrap"><svg id="timeline" height="200"></svg><div class="tip" id="tip"></div></div>
+      <div class="legend">
+        <span><i style="background:linear-gradient(90deg,hsl(10 60% 55%),hsl(140 50% 45%),hsl(220 60% 58%))"></i>running (task бүр өөр өнгө)</span>
+        <span><i style="background:repeating-linear-gradient(45deg,var(--idle),var(--idle) 3px,var(--idle-stripe) 3px,var(--idle-stripe) 6px)"></i>idle (sem_wait)</span>
+        <span><i style="background:var(--queue);opacity:.6"></i>queue-ийн урт</span>
+        <span><i style="background:var(--muted)"></i>submit</span>
+        <span><i style="background:var(--bad)"></i>reject</span>
+        <span><i style="background:var(--exit)"></i>worker гарсан</span>
+        <span>┆ shutdown</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Үр дүн ба шалгалт</h2>
+      <div class="metrics" id="metrics"></div>
+      <ul class="checks" id="checks"></ul>
+      <div class="cmd" id="cmd"></div>
+      <details><summary style="cursor:pointer;font-size:12.5px;margin-top:8px">C программын гаралт (stderr)</summary><pre id="log"></pre></details>
+    </section>
+
+    <section class="panel">
+      <h2>Үйл явдлын бүртгэл <span style="text-transform:none;letter-spacing:0">(мөр дээр дарж тухайн агшинд очно)</span></h2>
+      <div class="logwrap" id="logwrap"><table><thead><tr><th>#</th><th>t, ms</th><th>төрөл</th><th>worker</th><th>task</th><th>queue</th></tr></thead><tbody id="evbody"></tbody></table></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const DEFAULTS = {workers:3, queue:5, policy:"reject", retry:20, ntasks:15, dmin:200, dmax:800, amin:20, amax:120, seed:42};
+let online = false, mode = "random";
+let D = null;          // боловсруулсан trace
+let T = 0;             // одоогийн хугацаа, ms
+let playing = false, lastFrame = 0, raf = 0;
+
+/* ---------------- Сервертэй холбогдох ---------------- */
+async function health(){
+  try{
+    const r = await fetch("/api/health"); const j = await r.json();
+    online = true;
+    $("dot").className = "dot " + (j.ok ? "on" : "off");
+    $("statusText").textContent = j.ok ? "C программтай холбогдсон (" + j.binary + ")" : "build/threadpool_sim алга — make ажиллуулна уу";
+    if(!j.ok) online = false;
+  }catch(e){
+    online = false;
+    $("dot").className = "dot off";
+    $("statusText").textContent = "offline — зөвхөн trace файл үзэх горим";
+  }
+  $("run").disabled = !online;
+  if(!online) $("runnote").textContent = "Сервергүй нээгдсэн байна. Бодитоор ажиллуулахын тулд: make ui → http://localhost:8000. Хадгалсан trace JSON-ийг 'Trace ачаалах'-аар үзэж болно.";
+  return online;
+}
+async function loadPresets(){
+  try{
+    const j = await (await fetch("/api/presets")).json();
+    for(const p of j.presets){
+      const o = document.createElement("option"); o.value = p.text; o.textContent = p.name; $("preset").appendChild(o);
+    }
+  }catch(e){}
+}
+function setMode(m){
+  mode = m;
+  $("mRandom").classList.toggle("on", m === "random"); $("mList").classList.toggle("on", m === "list");
+  $("randomBox").hidden = m !== "random"; $("listBox").hidden = m !== "list";
+}
+function showErr(msg){ $("err").textContent = msg; $("err").classList.toggle("show", !!msg); }
+
+async function run(){
+  showErr("");
+  const body = {
+    workers:+$("workers").value, queue:+$("queue").value, policy:$("policy").value, retry_ms:+$("retry").value,
+  };
+  if(mode === "list"){
+    body.task_text = $("tasktext").value;
+    if(!body.task_text.trim()){ showErr("Task жагсаалт хоосон байна."); return; }
+  }else{
+    Object.assign(body, {tasks:+$("ntasks").value, dmin:+$("dmin").value, dmax:+$("dmax").value,
+                         amin:+$("amin").value, amax:+$("amax").value, seed:+$("seed").value});
+  }
+  for(const [k,v] of Object.entries(body)) if(typeof v === "number" && !Number.isFinite(v)){ showErr(`'${k}' талбар хоосон эсвэл тоо биш.`); return; }
+  $("run").disabled = true;
+  $("runnote").innerHTML = '<span class="spin"></span>C программ бодитоор ажиллаж байна…';
+  const t0 = performance.now();
+  try{
+    const r = await fetch("/api/run", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+    const j = await r.json();
+    if(!j.ok){ showErr(j.error || "Алдаа"); $("runnote").textContent = j.command ? "Команд: " + j.command : ""; return; }
+    $("runnote").textContent = `Ажиллуулалт ${((performance.now()-t0)/1000).toFixed(1)} сек үргэлжилсэн. Exit code = ${j.exit_code}.`;
+    setTrace(j.trace, j.command, j.log);
+    T = 0; play();
+  }catch(e){
+    showErr("Сервертэй холбогдож чадсангүй: " + e.message);
+  }finally{ $("run").disabled = !online; }
+}
+
+/* ---------------- Trace боловсруулах ---------------- */
+function bsearch(arr, x, key){ // key(arr[i]) <= x байх хамгийн сүүлийн индекс
+  let lo = 0, hi = arr.length - 1, ans = -1;
+  while(lo <= hi){ const m = (lo + hi) >> 1; if(key(arr[m]) <= x){ ans = m; lo = m + 1; } else hi = m - 1; }
+  return ans;
+}
+function setTrace(tr, command, log){
+  if(!tr || !tr.params || !Array.isArray(tr.events) || !Array.isArray(tr.tasks)) throw new Error("Trace бүтэц буруу (params/events/tasks алга)");
+  const W = tr.params.workers, Q = tr.params.queue;
+  const task = new Map(); for(const t of tr.tasks) task.set(t.id, {...t, sub:null, start:null, end:null, w:null});
+  const lanes = Array.from({length:W}, () => []), exitT = new Array(W).fill(Infinity);
+  const rejects = [], submits = [], qseries = [[0,0]], steps = [];
+  let shutdownT = null, tEnd = 0;
+  tr.events.forEach((e, i) => {
+    const t = e.t / 1000; tEnd = Math.max(tEnd, t);
+    if(e.type !== "IDLE") steps.push({...e, ms:t, i});
+    if(e.type === "SUBMIT"){ task.get(e.task).sub = t; submits.push(t); qseries.push([t, e.q]); }
+    else if(e.type === "REJECT") rejects.push({t, task:e.task});
+    else if(e.type === "START"){ const k = task.get(e.task); k.start = t; k.w = e.w; qseries.push([t, e.q]); }
+    else if(e.type === "END"){ const k = task.get(e.task); k.end = t; lanes[e.w].push(k); }
+    else if(e.type === "WORKER_EXIT") exitT[e.w] = t;
+    else if(e.type === "SHUTDOWN") shutdownT = t;
+  });
+  for(const l of lanes) l.sort((a,b) => a.start - b.start);
+  const accepted = [...task.values()].filter(k => k.sub !== null).sort((a,b) => a.sub - b.sub);
+  const ends = accepted.filter(k => k.end !== null).map(k => k.end).sort((a,b) => a - b);
+  D = {tr, W, Q, task, lanes, exitT, rejects, submits, qseries, steps, shutdownT, tEnd: Math.max(tEnd, 1), accepted, ends};
+  $("scrub").max = Math.ceil(D.tEnd);
+  $("save").disabled = false;
+  $("cmd").textContent = command ? "Команд: " + command : (tr.params.file ? "Файл: " + tr.params.file : "Ачаалсан trace");
+  $("log").textContent = log || "(trace файлаас ачаалсан — stderr хадгалагдаагүй)";
+  // UI-ийн талбаруудыг trace-ийн параметртэй тааруулах
+  $("workers").value = W; $("queue").value = Q; $("policy").value = tr.params.policy;
+  drawSummary(); buildLog(); drawTimeline(); render();
+}
+
+/* ---------------- t агшин дахь төлөв ---------------- */
+function stateAt(t){
+  const ws = [];
+  for(let w = 0; w < D.W; w++){
+    const lane = D.lanes[w];
+    const i = bsearch(lane, t, k => k.start);
+    const cur = (i >= 0 && t < lane[i].end) ? lane[i] : null;
+    const done = bsearch(lane, t, k => k.end) + 1;     // lane нь start-аар эрэмбэлэгдсэн; давхцахгүй тул end мөн өснө
+    const st = cur ? "running" : (t >= D.exitT[w] ? "exited" : "idle");
+    ws.push({w, st, cur, done, prog: cur ? (t - cur.start) / Math.max(cur.end - cur.start, 1e-9) : 0});
+  }
+  const q = D.accepted.filter(k => k.sub <= t && (k.start === null || k.start > t));
+  return {
+    ws, q,
+    submitted: bsearch(D.submits, t, x => x) + 1,
+    rejected: bsearch(D.rejects, t, r => r.t) + 1,
+    completed: bsearch(D.ends, t, x => x) + 1,
+    running: ws.filter(x => x.st === "running").length,
+    ev: bsearch(D.steps, t, e => e.ms)
+  };
+}
+const color = id => `hsl(${(id * 47) % 360} 55% 46%)`;
+
+let lastEvRow = -1;
+function render(){
+  if(!D) return;
+  const s = stateAt(T);
+  $("time").textContent = `t = ${T.toFixed(0)} / ${D.tEnd.toFixed(0)} ms`;
+  $("scrub").value = T;
+  // worker cards
+  const wc = $("wcards");
+  if(wc.children.length !== D.W){ wc.innerHTML = ""; for(let i = 0; i < D.W; i++){ const d = document.createElement("div"); d.className = "wcard"; d.innerHTML = '<div class="top"><span></span><span class="done"></span></div><div class="st"></div><div class="bar"><i></i></div>'; wc.appendChild(d); } }
+  s.ws.forEach((x, i) => {
+    const el = wc.children[i];
+    el.className = "wcard " + x.st;
+    el.querySelector(".top span").textContent = "W" + x.w;
+    el.querySelector(".done").textContent = "✓ " + x.done;
+    el.querySelector(".st").innerHTML = x.st === "running" ? `<b style="color:${color(x.cur.id)}">● running T${x.cur.id}</b>` : x.st === "idle" ? "○ idle — sem_wait" : "■ exited";
+    el.querySelector(".bar i").style.width = (x.prog * 100).toFixed(1) + "%";
+    el.querySelector(".bar i").style.background = x.cur ? color(x.cur.id) : "transparent";
+  });
+  // queue
+  const qs = $("qslots"), show = Math.min(D.Q, 40);
+  $("qlabel").textContent = `(${s.q.length} / ${D.Q}, FIFO: зүүн тал = head)`;
+  let h = "";
+  for(let i = 0; i < show; i++){ const k = s.q[i]; h += k ? `<div class="slot full" style="background:${color(k.id)}">T${k.id}</div>` : '<div class="slot"></div>'; }
+  if(D.Q > show) h += `<div class="slot" style="width:auto;padding:0 6px;color:var(--muted)">+${D.Q - show} slot</div>`;
+  qs.innerHTML = h;
+  $("cSub").textContent = s.submitted; $("cRun").textContent = s.running; $("cDone").textContent = s.completed; $("cRej").textContent = s.rejected;
+  // одоогийн үйл явдал
+  const e = D.steps[s.ev];
+  $("evnow").textContent = e ? describe(e) : "Pool эхлээгүй";
+  // playhead
+  const ph = $("playhead"); if(ph){ const x = X(T); ph.setAttribute("x1", x); ph.setAttribute("x2", x); }
+  // event log highlight
+  if(s.ev !== lastEvRow){
+    const rows = $("evbody").children;
+    for(let i = 0; i < rows.length; i++) rows[i].className = i === s.ev ? "cur" : (i > s.ev ? "future" : "");
+    if(rows[s.ev] && playing){ const wrap = $("logwrap"), r = rows[s.ev]; if(r.offsetTop < wrap.scrollTop + 24 || r.offsetTop > wrap.scrollTop + wrap.clientHeight - 24) wrap.scrollTop = r.offsetTop - wrap.clientHeight / 2; }
+    lastEvRow = s.ev;
+  }
+}
+function describe(e){
+  const t = e.ms.toFixed(1) + " ms: ";
+  switch(e.type){
+    case "POOL_INIT": return t + `pool_init — ${e.w} worker, queue ${e.task}`;
+    case "SUBMIT": return t + `pool_submit(T${e.task}) → queue-д орлоо (урт ${e.q}), sem_post`;
+    case "REJECT": return t + `pool_submit(T${e.task}) → queue дүүрсэн (${e.q}), 1 буцаав`;
+    case "START": return t + `W${e.w} sem_wait-аас сэрж T${e.task}-г dequeue хийв (queue ${e.q})`;
+    case "END": return t + `W${e.w} T${e.task}-г дуусгав → дахин sem_wait`;
+    case "SHUTDOWN": return t + `pool_shutdown() — үлдсэн task-уудыг дуусгаад зогсоно`;
+    case "WORKER_EXIT": return t + `W${e.w} гарав (pthread_join)`;
+  }
+  return t + e.type;
+}
+
+/* ---------------- Timeline (SVG) ---------------- */
+const LEFT = 58, RIGHT = 16, LANE = 24, GAP = 6;
+let plotW = 800;
+const X = t => LEFT + (t / D.tEnd) * plotW;
+function drawTimeline(){
+  if(!D) return;
+  const svg = $("timeline"), wrap = $("tlwrap");
+  const W = Math.max(wrap.clientWidth, 520);
+  plotW = W - LEFT - RIGHT;
+  const clientY = 8, qY = 34, qH = 44, lanesY = qY + qH + 14;
+  const H = lanesY + D.W * (LANE + GAP) + 26;
+  svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const css = getComputedStyle(document.documentElement), v = n => css.getPropertyValue(n).trim();
+  let s = `<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="${v("--idle")}"/><rect width="3" height="6" fill="${v("--idle-stripe")}"/></pattern></defs>`;
+  // client lane
+  s += `<text x="6" y="${clientY + 14}" font-size="11" fill="${v("--muted")}">client</text>`;
+  for(const t of D.submits) s += `<line x1="${X(t)}" x2="${X(t)}" y1="${clientY + 4}" y2="${clientY + 18}" stroke="${v("--muted")}" stroke-width="1"/>`;
+  for(const r of D.rejects){ const x = X(r.t); s += `<path d="M${x-4} ${clientY+5}l8 8m0 -8l-8 8" stroke="${v("--bad")}" stroke-width="1.6"/>`; }
+  // queue length step chart
+  const yq = q => qY + qH - (q / D.Q) * qH;
+  let path = `M${X(0)} ${yq(0)}`, prevQ = 0;
+  for(const [t, q] of D.qseries){ path += `L${X(t)} ${yq(prevQ)}L${X(t)} ${yq(q)}`; prevQ = q; }
+  path += `L${X(D.tEnd)} ${yq(prevQ)}L${X(D.tEnd)} ${yq(0)}Z`;
+  s += `<text x="6" y="${qY + 12}" font-size="11" fill="${v("--muted")}">queue</text><text x="6" y="${qY + 25}" font-size="10" fill="${v("--muted")}">max ${D.Q}</text>`;
+  s += `<rect x="${LEFT}" y="${qY}" width="${plotW}" height="${qH}" fill="none" stroke="${v("--line")}"/>`;
+  s += `<path d="${path}" fill="${v("--queue")}" fill-opacity=".35" stroke="${v("--queue")}" stroke-width="1"/>`;
+  // worker lanes
+  for(let w = 0; w < D.W; w++){
+    const y = lanesY + w * (LANE + GAP);
+    const ex = Math.min(D.exitT[w], D.tEnd);
+    s += `<text x="6" y="${y + LANE/2 + 4}" font-size="12" font-weight="600" fill="${v("--ink")}">W${w}</text>`;
+    s += `<rect x="${LEFT}" y="${y}" width="${X(ex) - LEFT}" height="${LANE}" fill="url(#hatch)"/>`;
+    if(D.exitT[w] < D.tEnd) s += `<rect x="${X(ex)}" y="${y}" width="${X(D.tEnd) - X(ex)}" height="${LANE}" fill="${v("--exit")}" opacity=".25"/>`;
+    for(const k of D.lanes[w]){
+      const x1 = X(k.start), x2 = X(k.end), bw = Math.max(x2 - x1, 1);
+      s += `<rect class="tb" data-id="${k.id}" x="${x1}" y="${y + 1}" width="${bw}" height="${LANE - 2}" rx="2" fill="${color(k.id)}"/>`;
+      if(bw > 26) s += `<text x="${x1 + 4}" y="${y + LANE/2 + 4}" font-size="11" fill="#fff" pointer-events="none">T${k.id}</text>`;
+    }
+  }
+  // shutdown
+  if(D.shutdownT !== null) s += `<line x1="${X(D.shutdownT)}" x2="${X(D.shutdownT)}" y1="${clientY}" y2="${H - 22}" stroke="${v("--muted")}" stroke-dasharray="3 3"/><text x="${X(D.shutdownT) + 3}" y="${H - 24}" font-size="10" fill="${v("--muted")}">shutdown</text>`;
+  // axis
+  const step = niceStep(D.tEnd / 8);
+  for(let t = 0; t <= D.tEnd + 1e-9; t += step){ const x = X(t); s += `<line x1="${x}" x2="${x}" y1="${H - 20}" y2="${H - 15}" stroke="${v("--muted")}"/><text x="${x}" y="${H - 4}" font-size="10" text-anchor="middle" fill="${v("--muted")}">${Math.round(t)}</text>`; }
+  s += `<text x="${W - RIGHT}" y="${H - 4}" font-size="10" text-anchor="end" fill="${v("--muted")}">ms</text>`;
+  s += `<line id="playhead" x1="${X(T)}" x2="${X(T)}" y1="2" y2="${H - 18}" stroke="${v("--ink")}" stroke-width="1.5"/>`;
+  svg.innerHTML = s;
+}
+function niceStep(x){ const p = Math.pow(10, Math.floor(Math.log10(Math.max(x, 1)))); for(const m of [1, 2, 5, 10]) if(m * p >= x) return m * p; return 10 * p; }
+
+/* ---------------- Хураангуй ба бүртгэл ---------------- */
+function drawSummary(){
+  const s = D.tr.summary, p = D.tr.params;
+  const m = [["Worker / Queue", `${p.workers} / ${p.queue}`], ["Policy", p.policy], ["Хүлээн авсан", s.submitted], ["Татгалзсан", s.rejected],
+             ["Дууссан", s.completed], ["Дундаж хүлээлт", s.avg_wait_ms.toFixed(1) + " ms"], ["Дээд хүлээлт", s.max_wait_ms.toFixed(1) + " ms"],
+             ["Дундаж turnaround", s.avg_turnaround_ms.toFixed(1) + " ms"], ["Makespan", s.makespan_ms.toFixed(1) + " ms"],
+             ["Worker ашиглалт", s.utilization_pct.toFixed(1) + " %"], ["Queue дээд урт", s.max_queue], ["Worker тус бүр", s.per_worker.map((c, i) => `W${i}:${c}`).join(" ")]];
+  $("metrics").innerHTML = m.map(([k, v]) => `<div class="m"><b>${v}</b><span>${k}</span></div>`).join("");
+  const v = D.tr.verify;
+  $("checks").innerHTML = `<li><span class="${v.ok ? "ok" : "fail"}">${v.ok ? "VERIFY OK" : "VERIFY FAILED"}</span> C программын дотоод шалгалт</li>` +
+    v.checks.map(c => `<li><span class="${c.ok ? "ok" : "fail"}">${c.ok ? "OK" : "FAIL"}</span>${c.detail}</li>`).join("");
+}
+function buildLog(){
+  const rows = D.steps.map((e, i) => `<tr data-i="${i}"><td>${i}</td><td>${e.ms.toFixed(2)}</td><td><span class="tag t-${e.type}">${e.type}</span></td><td>${e.w >= 0 && e.type !== "POOL_INIT" ? "W" + e.w : ""}</td><td>${e.task >= 0 && e.type !== "POOL_INIT" ? "T" + e.task : ""}</td><td>${e.q >= 0 ? e.q : ""}</td></tr>`);
+  $("evbody").innerHTML = rows.join(""); lastEvRow = -2;
+}
+
+/* ---------------- Тоглуулах ---------------- */
+function frame(now){
+  if(!playing) return;
+  const dt = (now - lastFrame) * +$("speed").value; lastFrame = now;
+  T = Math.min(T + dt, D.tEnd);
+  render();
+  if(T >= D.tEnd){ pause(); return; }
+  raf = requestAnimationFrame(frame);
+}
+function play(){ if(!D) return; if(T >= D.tEnd) T = 0; playing = true; $("playbtn").textContent = "⏸"; lastFrame = performance.now(); cancelAnimationFrame(raf); raf = requestAnimationFrame(frame); }
+function pause(){ playing = false; $("playbtn").textContent = "▶"; cancelAnimationFrame(raf); }
+function seek(t){ if(!D) return; T = Math.max(0, Math.min(t, D.tEnd)); render(); }
+function stepEv(dir){
+  if(!D) return; pause();
+  // дараагийн: T-ээс хойших эхний үйл явдал; өмнөх: T-ээс өмнөх сүүлийн үйл явдал
+  const ev = dir > 0 ? D.steps.find(e => e.ms > T + 1e-6)
+                     : [...D.steps].reverse().find(e => e.ms < T - 1e-6);
+  seek(ev ? ev.ms : (dir > 0 ? D.tEnd : 0));
+}
+
+/* ---------------- Үйл явдлууд ---------------- */
+$("mRandom").onclick = () => setMode("random");
+$("mList").onclick = () => setMode("list");
+$("preset").onchange = e => { if(e.target.value) $("tasktext").value = e.target.value; };
+$("run").onclick = run;
+$("defaults").onclick = () => { for(const [k, v] of Object.entries(DEFAULTS)) $(k).value = v; setMode("random"); showErr(""); };
+$("playbtn").onclick = () => playing ? pause() : play();
+$("reset").onclick = () => { pause(); seek(0); };
+$("next").onclick = () => stepEv(1);
+$("prev").onclick = () => stepEv(-1);
+$("scrub").oninput = e => { pause(); seek(+e.target.value); };
+$("evbody").onclick = e => { const tr = e.target.closest("tr"); if(tr){ pause(); seek(D.steps[+tr.dataset.i].ms); } };
+$("load").onclick = () => $("file").click();
+$("file").onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  try{ pause(); setTrace(JSON.parse(await f.text()), null, null); T = 0; render(); showErr(""); $("runnote").textContent = "Ачаалсан: " + f.name; }
+  catch(err){ showErr("Trace файл уншиж чадсангүй: " + err.message); }
+  e.target.value = "";
+};
+$("save").onclick = () => {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(D.tr, null, 1)], {type:"application/json"}));
+  a.download = `trace_w${D.W}_q${D.Q}.json`; a.click(); URL.revokeObjectURL(a.href);
+};
+const svgEl = $("timeline");
+let dragging = false;
+const toT = ev => { const r = svgEl.getBoundingClientRect(); return (ev.clientX - r.left - LEFT) / plotW * D.tEnd; };
+svgEl.addEventListener("pointerdown", ev => { if(!D) return; dragging = true; pause(); seek(toT(ev)); });
+window.addEventListener("pointerup", () => dragging = false);
+svgEl.addEventListener("pointermove", ev => {
+  if(!D) return;
+  if(dragging) seek(toT(ev));
+  const tip = $("tip"), b = ev.target.closest(".tb");
+  if(b){
+    const k = D.task.get(+b.dataset.id), wr = $("tlwrap").getBoundingClientRect();
+    tip.textContent = `T${k.id} · W${k.w}\nsubmit  ${k.sub.toFixed(1)} ms\nstart   ${k.start.toFixed(1)} ms\nend     ${k.end.toFixed(1)} ms\nхүлээлт ${(k.start - k.sub).toFixed(1)} ms\nажилласан ${(k.end - k.start).toFixed(1)} ms (захиалсан ${k.duration_ms})`;
+    tip.style.display = "block"; tip.style.left = (ev.clientX - wr.left + 12 + $("tlwrap").scrollLeft) + "px"; tip.style.top = (ev.clientY - wr.top + 12) + "px";
+  }else tip.style.display = "none";
+});
+svgEl.addEventListener("pointerleave", () => $("tip").style.display = "none");
+document.addEventListener("keydown", e => {
+  if(["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) return;
+  if(e.code === "Space"){ e.preventDefault(); playing ? pause() : play(); }
+  else if(e.key === "ArrowRight") stepEv(1);
+  else if(e.key === "ArrowLeft") stepEv(-1);
+});
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { drawTimeline(); render(); }, 120); });
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { drawTimeline(); render(); });
+
+(async () => {
+  const theme = new URLSearchParams(location.search).get("theme"); if(theme) document.documentElement.dataset.theme = theme;
+  if(await health()){ await loadPresets(); if(!new URLSearchParams(location.search).has("norun")) run(); }
+})();
+</script>
+</body>
+</html>
