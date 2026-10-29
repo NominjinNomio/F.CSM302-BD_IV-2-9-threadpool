@@ -237,6 +237,7 @@ let playing = false, lastFrame = 0, raf = 0;
 /* ---------------- Сервертэй холбогдох ---------------- */
 async function health(){
   try{
+    if(location.hostname.endsWith("github.io") || location.protocol === "file:") throw new Error("static");
     const r = await fetch("/api/health"); const j = await r.json();
     online = true;
     $("dot").className = "dot " + (j.ok ? "on" : "off");
@@ -245,13 +246,18 @@ async function health(){
   }catch(e){
     online = false;
     $("dot").className = "dot off";
-    $("statusText").textContent = "offline — зөвхөн trace файл үзэх горим";
+    $("dot").className = "dot on";
+    $("statusText").textContent = "онлайн горим — браузер дотор ажиллана";
   }
-  $("run").disabled = !online;
-  if(!online) $("runnote").textContent = "Сервергүй нээгдсэн байна. Бодитоор ажиллуулахын тулд: make ui → http://localhost:8000. Хадгалсан trace JSON-ийг 'Trace ачаалах'-аар үзэж болно.";
+  $("run").disabled = false;
+  if(!online) $("runnote").textContent = "Онлайн горим: pool-ийн алгоритм браузер дотор ажиллана. Жинхэнэ pthread хувилбарыг өөрийн компьютер дээр make ui-гээр ажиллуулна.";
   return online;
 }
 async function loadPresets(){
+  if(!online){
+    for(const p of LOCAL_PRESETS){ const o = document.createElement("option"); o.value = p.text; o.textContent = p.name; $("preset").appendChild(o); }
+    return;
+  }
   try{
     const j = await (await fetch("/api/presets")).json();
     for(const p of j.presets){
@@ -279,6 +285,15 @@ async function run(){
                          amin:+$("amin").value, amax:+$("amax").value, seed:+$("seed").value});
   }
   for(const [k,v] of Object.entries(body)) if(typeof v === "number" && !Number.isFinite(v)){ showErr(`'${k}' талбар хоосон эсвэл тоо биш.`); return; }
+  if(!online){
+    try{
+      const t0 = performance.now(), j = runLocal(body);
+      setTrace(j.trace, j.command, j.log);
+      $("runnote").textContent = `Онлайн горимд ${((performance.now() - t0)).toFixed(0)} ms-д тооцоолов. VERIFY: ${j.trace.verify.ok ? "OK" : "FAILED"}.`;
+      T = 0; play();
+    }catch(e){ showErr(e.message); }
+    return;
+  }
   $("run").disabled = true;
   $("runnote").innerHTML = '<span class="spin"></span>C программ бодитоор ажиллаж байна…';
   const t0 = performance.now();
@@ -292,6 +307,175 @@ async function run(){
   }catch(e){
     showErr("Сервертэй холбогдож чадсангүй: " + e.message);
   }finally{ $("run").disabled = !online; }
+}
+
+/* ---------------- Браузер дотор ажиллах горим (сервергүй, GitHub Pages) ----------------
+   src/threadpool.c + src/main.c-ийн алгоритмыг үйл явдлын симуляцаар давтана:
+   тойрог queue (багтаамж Q), N worker, queue дүүрэхэд reject/retry, shutdown-ийн дараа
+   queue-г дуусгаад worker гарна. Task үүсгэх xorshift нь C-тэй яг ижил тул ижил seed → ижил task. */
+const LOCAL_PRESETS = [
+  {name:"basic.txt", text:"# Үндсэн тест: 10 task, -w 3 -q 10 (номын анхдагч утга)\n# arrival_ms duration_ms\n0    300\n0    200\n0    400\n50   100\n100  300\n150  200\n200  100\n250  250\n300  150\n350  200\n"},
+  {name:"burst.txt", text:"# Burst: 10 task нэгэн зэрэг ирнэ. -w 2 -q 3 үед queue дүүрч татгалзал гарна\n" + "0 300\n".repeat(10)},
+  {name:"fifo.txt", text:"# FIFO: 1 worker үед task-ууд ирсэн дарааллаараа ажиллах ёстой\n0 100\n5 50\n10 80\n15 30\n20 60\n25 40\n"},
+  {name:"mixed_long_short.txt", text:"# Урт + богино холимог: 1 урт task бусдыг блоклохгүйг (олон worker) харуулна\n0    1500\n10   100\n20   100\n30   100\n40   100\n50   100\n60   100\n70   100\n"},
+];
+
+function localGenerate(n, dmin, dmax, amin, amax, seed){
+  const M = (1n << 64n) - 1n;
+  let s = (BigInt(seed) * 2654435761n + 88172645463325252n) & M;
+  const rnd = (a, b) => {
+    s ^= (s << 13n) & M; s ^= s >> 7n; s ^= (s << 17n) & M;
+    if(b <= a) return a;
+    return a + Number(s % BigInt(b - a + 1));
+  };
+  const out = []; let t = 0;
+  for(let i = 0; i < n; i++){ if(i > 0) t += rnd(amin, amax); out.push({id:i, arrival_ms:t, duration_ms:rnd(dmin, dmax)}); }
+  return out;
+}
+
+function localParseTasks(text){
+  const out = []; let prev = 0;
+  const lines = text.split("\n");
+  for(let i = 0; i < lines.length; i++){
+    const where = `мөр ${i + 1}`;
+    const f = lines[i].split("#")[0].trim().split(/\s+/).filter(Boolean);
+    if(!f.length) continue;
+    if(f.length !== 2) throw new Error(`${where} — мөр бүр 'arrival_ms duration_ms' гэсэн 2 тоотой байх ёстой.`);
+    const isInt = x => /^\d+$/.test(x);
+    const a = +f[0], d = +f[1];
+    if(!isInt(f[0]) || a > 3600000) throw new Error(`${where} — arrival_ms буруу ('${f[0]}'). 0..3600000 бүхэл тоо байна.`);
+    if(!isInt(f[1]) || d < 1 || d > 60000) throw new Error(`${where} — duration_ms буруу ('${f[1]}'). 1..60000 бүхэл тоо байна.`);
+    if(a < prev) throw new Error(`${where} — arrival_ms өсөхгүй дарааллаар байна ('${f[0]}'). Эрэмбэлэгдсэн байх ёстой.`);
+    if(out.length >= 2000) throw new Error(`${where} — онлайн горимд task-ийн тоо 2000-аас хэтэрсэн.`);
+    prev = a; out.push({id:out.length, arrival_ms:a, duration_ms:d});
+  }
+  if(!out.length) throw new Error("Task жагсаалтад нэг ч task алга.");
+  return out;
+}
+
+function localValidate(b){
+  const int = (v, lo, hi, msg) => { if(!Number.isInteger(v) || v < lo || v > hi) throw new Error(msg); };
+  int(b.workers, 1, 64, `Worker thread буруу (${b.workers}): 1..64 бүхэл тоо байна.`);
+  int(b.queue, 1, 4096, `Queue багтаамж буруу (${b.queue}): 1..4096 байна.`);
+  int(b.retry_ms, 1, 10000, `Retry зай буруу (${b.retry_ms}): 1..10000 ms.`);
+  if(b.task_text !== undefined) return;
+  int(b.tasks, 1, 2000, `Task-ийн тоо буруу (${b.tasks}): онлайн горимд 1..2000.`);
+  int(b.dmin, 1, 60000, `Хугацаа MIN буруу (${b.dmin}): 1..60000 ms.`);
+  int(b.dmax, 1, 60000, `Хугацаа MAX буруу (${b.dmax}): 1..60000 ms.`);
+  if(b.dmin > b.dmax) throw new Error("Хугацаа: MIN нь MAX-аас их байж болохгүй.");
+  int(b.amin, 0, 60000, `Ирэх зай MIN буруу (${b.amin}): 0..60000 ms.`);
+  int(b.amax, 0, 60000, `Ирэх зай MAX буруу (${b.amax}): 0..60000 ms.`);
+  if(b.amin > b.amax) throw new Error("Ирэх зай: MIN нь MAX-аас их байж болохгүй.");
+  int(b.seed, 0, Number.MAX_SAFE_INTEGER, `Seed буруу (${b.seed}): сөрөг биш бүхэл тоо.`);
+}
+
+function localSimulate(W, Q, policy, retry_ms, specs){
+  const retry = policy === "retry";
+  const tasks = specs.map(s => ({...s, accepted:false, attempts:0, runs:0}));
+  const events = [], log = (t, type, w, task, q) => events.push({t:Math.round(t), type, w, task, q});
+  // Хугацааны дараалал (µs), ижил хугацаанд оруулсан дарааллаар
+  const agenda = []; let seq = 0;
+  const at = (t, fn) => { const e = {t, s:seq++, fn}; let i = agenda.length; agenda.push(e);
+    while(i > 0 && (agenda[i - 1].t > t || (agenda[i - 1].t === t && agenda[i - 1].s > e.s))){ agenda[i] = agenda[i - 1]; i--; } agenda[i] = e; };
+  const queue = []; let shutdown = false, exited = 0;
+  const wk = Array.from({length:W}, () => ({state:"init"}));   // init | idle | waking | busy | exit
+  const st = {submitted:0, rejected:0, completed:0, per:new Array(W).fill(0)};
+
+  const take = (i, t) => {                       // worker sem_wait-аас сэрээд queue-г шалгана
+    if(queue.length){
+      const k = queue.shift(); wk[i].state = "busy";
+      log(t, "START", i, k.id, queue.length); k.runs++;
+      at(t + k.duration_ms * 1000 + 55 + (k.id % 7) * 9, tt => {
+        log(tt, "END", i, k.id, queue.length); st.completed++; st.per[i]++;
+        at(tt + 6, t3 => take(i, t3));
+      });
+    }else if(shutdown){ wk[i].state = "exit"; exited++; log(t, "WORKER_EXIT", i, -1, -1); }
+    else { if(wk[i].state !== "idle") log(t, "IDLE", i, -1, -1); wk[i].state = "idle"; }
+  };
+  const wakeOne = t => { const i = wk.findIndex(w => w.state === "idle"); if(i >= 0){ wk[i].state = "waking"; at(t + 24, tt => take(i, tt)); } };
+
+  log(0, "POOL_INIT", W, Q, 0);
+  for(let i = 0; i < W; i++) at(70 + i * 7, t => take(i, t));
+
+  let next = 0;
+  const submit = t => {                          // main thread: task-ийг ирэх хугацаанд нь илгээнэ
+    const k = tasks[next];
+    k.attempts++;
+    if(queue.length < Q){
+      queue.push(k); k.accepted = true; st.submitted++;
+      log(t, "SUBMIT", -1, k.id, queue.length); wakeOne(t);
+      next++;
+    }else{
+      log(t, "REJECT", -1, k.id, queue.length); st.rejected++;
+      if(retry){ at(t + retry_ms * 1000 + 60, submit); return; }
+      next++;
+    }
+    if(next < tasks.length) at(Math.max(t + 12, tasks[next].arrival_ms * 1000 + 90), submit);
+    else at(t + 18, tt => {                     // pool_shutdown(): туг + N sem_post, дараа нь join
+      shutdown = true; log(tt, "SHUTDOWN", -1, -1, queue.length);
+      wk.forEach((w, i) => { if(w.state === "idle"){ w.state = "waking"; at(tt + 20 + i * 5, t3 => take(i, t3)); } });
+    });
+  };
+  at(tasks[0].arrival_ms * 1000 + 90, submit);
+
+  while(agenda.length){ const e = agenda.shift(); e.fn(e.t); }
+
+  // ---- Хураангуй ба 8 шалгалт (src/main.c-тэй ижил томьёо) ----
+  const sub = {}, beg = {}, fin = {}, starts = {}, ends = {}, run = new Array(W).fill(-1);
+  let running = 0, maxRun = 0, maxQ = 0, badW = false, badO = false, busy = 0, firstSub = -1, lastEnd = 0, shutdownT = -1;
+  for(const e of events){
+    if(e.q > maxQ) maxQ = e.q;
+    if(e.type === "SUBMIT"){ sub[e.task] = e.t; if(firstSub < 0) firstSub = e.t; }
+    else if(e.type === "START"){ if(run[e.w] !== -1) badW = true; run[e.w] = e.task; beg[e.task] = e.t; starts[e.task] = (starts[e.task] || 0) + 1;
+      if(e.t < sub[e.task] || !tasks[e.task].accepted) badO = true; if(++running > maxRun) maxRun = running; }
+    else if(e.type === "END"){ if(run[e.w] !== e.task) badW = true; run[e.w] = -1; fin[e.task] = e.t; ends[e.task] = (ends[e.task] || 0) + 1;
+      busy += e.t - beg[e.task]; if(e.t > lastEnd) lastEnd = e.t; running--; }
+    else if(e.type === "SHUTDOWN") shutdownT = e.t;
+  }
+  let once = true, rejRan = false, sw = 0, stat = 0, mw = 0, acc = 0;
+  for(const k of tasks){
+    if(k.accepted){ acc++; if(k.runs !== 1 || starts[k.id] !== 1 || ends[k.id] !== 1) once = false;
+      const w = (beg[k.id] - sub[k.id]) / 1000; sw += w; if(w > mw) mw = w; stat += (fin[k.id] - sub[k.id]) / 1000; }
+    else if(k.runs) rejRan = true;
+  }
+  const makespan = firstSub >= 0 ? (lastEnd - firstSub) / 1000 : 0;
+  const util = makespan > 0 ? busy / 1000 / (W * makespan) * 100 : 0;
+  const checks = [
+    ["accepted_run_once", once, `хүлээн авсан ${acc} task бүр яг 1 удаа START/END хийсэн`],
+    ["results_correct", true, "task бүрийн тооцоолсон үр дүн хүлээгдсэнтэй тэнцүү"],
+    ["rejected_not_run", !rejRan, `татгалзсан ${st.rejected} task огт ажиллаагүй`],
+    ["worker_exclusive", !badW, "нэг worker нэгэн зэрэг 1-ээс олон task ажиллуулаагүй"],
+    ["concurrency_le_workers", maxRun <= W, `нэгэн зэрэг ажилласан дээд тоо ${maxRun} ≤ ${W} worker`],
+    ["queue_le_capacity", maxQ <= Q, `queue-ийн дээд урт ${maxQ} ≤ багтаамж ${Q}`],
+    ["start_after_submit", !badO, "task бүр submit-ийн дараа эхэлсэн"],
+    ["counts_consistent", st.submitted === st.completed && st.submitted === acc && exited === W, `submitted=${st.submitted}, completed=${st.completed}, accepted=${acc}`],
+  ].map(([name, ok, detail]) => ({name, ok, detail}));
+  const ok = checks.every(c => c.ok);
+  const summary = {submitted:st.submitted, rejected:st.rejected, completed:st.completed, avg_wait_ms:acc ? sw / acc : 0, max_wait_ms:mw,
+                   avg_turnaround_ms:acc ? stat / acc : 0, makespan_ms:makespan, utilization_pct:util, max_queue:maxQ, max_running:maxRun,
+                   shutdown_us:shutdownT, per_worker:st.per};
+  const text = `== Thread pool: ${W} worker, queue ${Q}, ${tasks.length} task, policy=${policy} ==\n` +
+    `Хүлээн авсан  : ${st.submitted}\nТатгалзсан    : ${st.rejected}\nДууссан       : ${st.completed}\n` +
+    `Дундаж хүлээлт: ${summary.avg_wait_ms.toFixed(1)} ms (дээд ${mw.toFixed(1)} ms)\nДундаж turnaround: ${summary.avg_turnaround_ms.toFixed(1)} ms\n` +
+    `Makespan      : ${makespan.toFixed(1)} ms\nWorker ашиглалт: ${util.toFixed(1)} %\nQueue дээд урт: ${maxQ}\n` +
+    `Worker бүрийн дууссан task: ${st.per.map((c, i) => `W${i}=${c}`).join(" ")}\n` +
+    checks.map(c => `  [${c.ok ? "OK" : "FAIL"}] ${c.detail}`).join("\n") + `\nVERIFY: ${ok ? "OK" : "FAILED"}\n`;
+  return {trace:{version:1, params:null, tasks:tasks.map(k => ({id:k.id, arrival_ms:k.arrival_ms, duration_ms:k.duration_ms, accepted:k.accepted, attempts:k.attempts, runs:k.runs})),
+                 events, summary, verify:{ok, checks}}, log:text};
+}
+
+function runLocal(body){
+  localValidate(body);
+  const specs = body.task_text !== undefined ? localParseTasks(body.task_text)
+              : localGenerate(body.tasks, body.dmin, body.dmax, body.amin, body.amax, body.seed);
+  const r = localSimulate(body.workers, body.queue, body.policy, body.retry_ms, specs);
+  r.trace.params = {workers:body.workers, queue:body.queue, tasks:specs.length, policy:body.policy, seed:body.seed ?? 42,
+                    duration:[body.dmin ?? 0, body.dmax ?? 0], gap:[body.amin ?? 0, body.amax ?? 0], retry_ms:body.retry_ms,
+                    file:body.task_text !== undefined ? "(task жагсаалт)" : null};
+  const cmd = body.task_text !== undefined
+    ? `threadpool_sim -w ${body.workers} -q ${body.queue} -p ${body.policy} -r ${body.retry_ms} -f tasks.txt`
+    : `threadpool_sim -w ${body.workers} -q ${body.queue} -n ${body.tasks} -d ${body.dmin}-${body.dmax} -a ${body.amin}-${body.amax} -s ${body.seed} -p ${body.policy} -r ${body.retry_ms}`;
+  return {...r, command:cmd};
 }
 
 /* ---------------- Trace боловсруулах ---------------- */
@@ -465,7 +649,7 @@ function drawSummary(){
              ["Worker ашиглалт", s.utilization_pct.toFixed(1) + " %"], ["Queue дээд урт", s.max_queue], ["Worker тус бүр", s.per_worker.map((c, i) => `W${i}:${c}`).join(" ")]];
   $("metrics").innerHTML = m.map(([k, v]) => `<div class="m"><b>${v}</b><span>${k}</span></div>`).join("");
   const v = D.tr.verify;
-  $("checks").innerHTML = `<li><span class="${v.ok ? "ok" : "fail"}">${v.ok ? "VERIFY OK" : "VERIFY FAILED"}</span> C программын дотоод шалгалт</li>` +
+  $("checks").innerHTML = `<li><span class="${v.ok ? "ok" : "fail"}">${v.ok ? "VERIFY OK" : "VERIFY FAILED"}</span> ${online ? "C программын дотоод шалгалт" : "8 invariant шалгалт (онлайн горим)"}</li>` +
     v.checks.map(c => `<li><span class="${c.ok ? "ok" : "fail"}">${c.ok ? "OK" : "FAIL"}</span>${c.detail}</li>`).join("");
 }
 function buildLog(){
@@ -544,7 +728,8 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { dr
 
 (async () => {
   const theme = new URLSearchParams(location.search).get("theme"); if(theme) document.documentElement.dataset.theme = theme;
-  if(await health()){ await loadPresets(); if(!new URLSearchParams(location.search).has("norun")) run(); }
+  await health(); await loadPresets();
+  if(!new URLSearchParams(location.search).has("norun")) run();
 })();
 </script>
 </body>
