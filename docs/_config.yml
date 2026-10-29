@@ -1,0 +1,9 @@
+theme: jekyll-theme-cayman
+title: IV-2-9 Thread Pool
+description: F.CSM302 Бие даалт 1 — Designing a Thread Pool
+exclude:
+  - latex/fonts
+  - latex/*.tex
+  - latex/*.sty
+  - latex/latexmkrc
+  - IV-2-9_overleaf.zip
